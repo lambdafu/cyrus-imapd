@@ -97,6 +97,7 @@ static int required_set_rights(json_t *props);
 static int _json_to_card(struct jmap_req *req,
                          struct carddav_data *cdata,
                          struct vparse_card *card,
+                         const char *mboxname,
                          json_t *arg, strarray_t *flags,
                          struct entryattlist **annotsp,
                          json_t **item,
@@ -319,11 +320,16 @@ static int getgroups_cb(void *rock, struct carddav_data *cdata)
     struct index_record record;
     jmap_req_t *req = crock->req;
     json_t *obj = NULL;
+    mbentry_t *mbentry = NULL;
     char *xhref;
-    int r;
+    int r = 0;
 
-    if (!jmap_hasrights(req, cdata->dav.mailbox, JACL_READITEMS))
+    mbentry = jmap_mbentry_by_uniqueid_copy(crock->req, cdata->dav.mailbox);
+
+    if (!mbentry || !jmap_hasrights_mbentry(req, mbentry, JACL_READITEMS)) {
+        mboxlist_entry_free(&mbentry);
         return 0;
+    }
 
     if (cdata->jmapversion == JMAPCACHE_CONTACTVERSION) {
         json_error_t jerr;
@@ -331,11 +337,12 @@ static int getgroups_cb(void *rock, struct carddav_data *cdata)
         if (obj) goto gotvalue;
     }
 
-    if (!crock->mailbox || strcmp(crock->mailbox->name, cdata->dav.mailbox)) {
+    if (!crock->mailbox || strcmp(crock->mailbox->uniqueid, cdata->dav.mailbox)) {
         mailbox_close(&crock->mailbox);
-        r = mailbox_open_irl(cdata->dav.mailbox, &crock->mailbox);
-        if (r) return r;
+        r = mailbox_open_irl(mbentry->name, &crock->mailbox);
     }
+    mboxlist_entry_free(&mbentry);
+    if (r) return r;
 
     r = mailbox_find_index_record(crock->mailbox, cdata->dav.imap_uid, &record);
     if (r) return r;
@@ -361,9 +368,9 @@ gotvalue:
     json_object_set_new(obj, "uid", json_string(cdata->vcard_uid));
 
     json_object_set_new(obj, "addressbookId",
-                        json_string(strrchr(cdata->dav.mailbox, '.')+1));
+                        json_string(strrchr(crock->mailbox->name, '.')+1));
 
-    xhref = jmap_xhref(cdata->dav.mailbox, cdata->dav.resource);
+    xhref = jmap_xhref(crock->mailbox->name, cdata->dav.resource);
     json_object_set_new(obj, "x-href", json_string(xhref));
     free(xhref);
 
@@ -609,7 +616,7 @@ static int _contacts_get(struct jmap_req *req, carddav_cb_t *cb, int kind)
     struct jmap_get get;
     json_t *err = NULL;
     struct carddav_db *db = NULL;
-    char *mboxname = NULL;
+    mbentry_t *mbentry = NULL;
     int r = 0;
 
     /* Build callback data */
@@ -628,8 +635,6 @@ static int _contacts_get(struct jmap_req *req, carddav_cb_t *cb, int kind)
         jmap_error(req, err);
         goto done;
     }
-    mboxname = addressbookId ?
-        carddav_mboxname(req->accountid, addressbookId) : NULL;
 
     /* Does the client request specific events? */
     rock.db = db = carddav_open_userid(req->accountid);
@@ -639,6 +644,16 @@ static int _contacts_get(struct jmap_req *req, carddav_cb_t *cb, int kind)
         r = IMAP_INTERNAL;
         goto done;
     }
+
+    const char *mboxid = NULL;
+    if (addressbookId) {
+        char *mboxname = carddav_mboxname(req->accountid, addressbookId);
+        mboxlist_lookup_allow_all(mboxname, &mbentry, NULL);
+        free(mboxname);
+        if (mbentry) mboxid = mbentry->uniqueid;
+        /* XXX  invalidArgument? */
+    }
+
     if (JNOTNULL(get.ids)) {
         size_t i;
         json_t *jval;
@@ -646,7 +661,7 @@ static int _contacts_get(struct jmap_req *req, carddav_cb_t *cb, int kind)
             rock.rows = 0;
             const char *id = json_string_value(jval);
 
-            r = carddav_get_cards(db, mboxname, id, kind, cb, &rock);
+            r = carddav_get_cards(db, mboxid, id, kind, cb, &rock);
             if (r || !rock.rows) {
                 json_array_append(get.not_found, jval);
             }
@@ -655,7 +670,7 @@ static int _contacts_get(struct jmap_req *req, carddav_cb_t *cb, int kind)
     }
     else {
         rock.rows = 0;
-        r = carddav_get_cards(db, mboxname, NULL, kind, cb, &rock);
+        r = carddav_get_cards(db, mboxid, NULL, kind, cb, &rock);
         if (r) goto done;
     }
 
@@ -676,7 +691,7 @@ static int _contacts_get(struct jmap_req *req, carddav_cb_t *cb, int kind)
   done:
     jmap_parser_fini(&parser);
     jmap_get_fini(&get);
-    free(mboxname);
+    mboxlist_entry_free(&mbentry);
     mailbox_close(&rock.mailbox);
     free_hashu64_table(&rock.jmapcache, free);
     if (db) carddav_close(db);
@@ -702,8 +717,14 @@ static int getchanges_cb(void *rock, struct carddav_data *cdata)
     struct changes_rock *urock = (struct changes_rock *) rock;
     struct dav_data dav = cdata->dav;
     const char *uid = cdata->vcard_uid;
+    mbentry_t *mbentry = NULL;
 
-    if (!jmap_hasrights(urock->req, dav.mailbox, JACL_READITEMS))
+    mbentry = jmap_mbentry_by_uniqueid_copy(urock->req, dav.mailbox);
+
+    int rights =
+        mbentry && jmap_hasrights_mbentry(urock->req, mbentry, JACL_READITEMS);
+    mboxlist_entry_free(&mbentry);
+    if (!rights)
         return 0;
 
     /* Count, but don't process items that exceed the maximum record count. */
@@ -743,7 +764,7 @@ static int _contacts_changes(struct jmap_req *req, int kind)
     struct jmap_changes changes;
     json_t *err = NULL;
     struct carddav_db *db = NULL;
-    char *mboxname = NULL;
+    mbentry_t *mbentry = NULL;
     int r = 0;
 
     /* Parse request */
@@ -754,8 +775,15 @@ static int _contacts_changes(struct jmap_req *req, int kind)
         jmap_error(req, err);
         goto done;
     }
-    mboxname = addressbookId ?
-        carddav_mboxname(req->accountid, addressbookId) : NULL;
+
+    const char *mboxid = NULL;
+    if (addressbookId) {
+        char *mboxname = carddav_mboxname(req->accountid, addressbookId);
+        mboxlist_lookup_allow_all(mboxname, &mbentry, NULL);
+        free(mboxname);
+        if (mbentry) mboxid = mbentry->uniqueid;
+        /* XXX  invalidArgument? */
+    }
 
     /* Lookup updates. */
     db = carddav_open_userid(req->accountid);
@@ -766,7 +794,7 @@ static int _contacts_changes(struct jmap_req *req, int kind)
         goto done;
     }
     struct changes_rock rock = { req, &changes, 0 /*seen_records*/, 0 /*highestmodseq*/};
-    r = carddav_get_updates(db, changes.since_modseq, mboxname, kind,
+    r = carddav_get_updates(db, changes.since_modseq, mboxid, kind,
                             -1 /*max_records*/, &getchanges_cb, &rock);
     if (r) goto done;
 
@@ -784,7 +812,8 @@ static int _contacts_changes(struct jmap_req *req, int kind)
     jmap_changes_fini(&changes);
     jmap_parser_fini(&parser);
     carddav_close(db);
-    free(mboxname);
+    mboxlist_entry_free(&mbentry);
+
     return 0;
 }
 
@@ -967,6 +996,7 @@ static void _contacts_set(struct jmap_req *req, unsigned kind)
     struct buf buf = BUF_INITIALIZER;
     const char *uid;
     json_object_foreach(set.update, uid, arg) {
+        mbentry_t *mbentry = NULL;
         struct carddav_data *cdata = NULL;
         r = carddav_lookup_uid(db, uid, &cdata);
         uint32_t olduid;
@@ -982,22 +1012,26 @@ static void _contacts_set(struct jmap_req *req, unsigned kind)
             continue;
         }
 
+        mbentry = jmap_mbentry_by_uniqueid_copy(req, cdata->dav.mailbox);
+
         json_t *abookid = json_object_get(arg, "addressbookId");
         if (abookid && json_string_value(abookid)) {
             const char *mboxname =
                 mboxname_abook(req->accountid, json_string_value(abookid));
-            if (strcmp(mboxname, cdata->dav.mailbox)) {
+            if (mbentry && strcmp(mboxname, mbentry->name)) {
                 /* move */
                 if (!jmap_hasrights(req, mboxname, JACL_ADDITEMS)) {
                     json_t *err = json_pack("{s:s s:[s]}",
                                             "type", "invalidProperties",
                                             "properties", "addressbookId");
                     json_object_set_new(set.not_updated, uid, err);
+                    mboxlist_entry_free(&mbentry);
                     continue;
                 }
                 r = jmap_openmbox(req, mboxname, &newmailbox, 1);
                 if (r) {
                     syslog(LOG_ERR, "IOERROR: failed to open %s", mboxname);
+                    mboxlist_entry_free(&mbentry);
                     goto done;
                 }
                 do_move = 1;
@@ -1007,23 +1041,25 @@ static void _contacts_set(struct jmap_req *req, unsigned kind)
 
         int needrights = do_move ? JACL_UPDATEITEMS : required_set_rights(arg);
 
-        if (!jmap_hasrights(req, cdata->dav.mailbox, needrights)) {
-            int rights = jmap_myrights(req, cdata->dav.mailbox);
+        if (!mbentry || !jmap_hasrights_mbentry(req, mbentry, needrights)) {
+            int rights = mbentry ? jmap_myrights_mbentry(req, mbentry) : 0;
             json_t *err = json_pack("{s:s}", "type",
                                     rights & JACL_READITEMS ?
                                     "accountReadOnly" : "notFound");
             json_object_set_new(set.not_updated, uid, err);
+            mboxlist_entry_free(&mbentry);
             continue;
         }
 
-        if (!mailbox || strcmp(mailbox->name, cdata->dav.mailbox)) {
+        if (!mailbox || strcmp(mailbox->name, mbentry->name)) {
             jmap_closembox(req, &mailbox);
-            r = jmap_openmbox(req, cdata->dav.mailbox, &mailbox, 1);
-            if (r) {
-                syslog(LOG_ERR, "IOERROR: failed to open %s",
-                       cdata->dav.mailbox);
-                goto done;
-            }
+            r = jmap_openmbox(req, mbentry->name, &mailbox, 1);
+        }
+        mboxlist_entry_free(&mbentry);
+        if (r) {
+            syslog(LOG_ERR, "IOERROR: failed to open %s",
+                   mbentry->name);
+            goto done;
         }
 
         struct index_record record;
@@ -1124,7 +1160,8 @@ static void _contacts_set(struct jmap_req *req, unsigned kind)
             flags = mailbox_extract_flags(mailbox, &record, req->accountid);
             annots = mailbox_extract_annots(mailbox, &record);
 
-            r = _json_to_card(req, cdata, card, arg, flags, &annots, &item, &errors);
+            r = _json_to_card(req, cdata, card, mailbox->name,
+                              arg, flags, &annots, &item, &errors);
             if (r == HTTP_NO_CONTENT) {
                 r = 0;
                 if (!newmailbox) {
@@ -1237,6 +1274,7 @@ static void _contacts_set(struct jmap_req *req, unsigned kind)
             json_object_set_new(set.not_destroyed, uid, err);
             continue;
         }
+        mbentry_t *mbentry = NULL;
         struct carddav_data *cdata = NULL;
         uint32_t olduid;
         r = carddav_lookup_uid(db, uid, &cdata);
@@ -1250,20 +1288,24 @@ static void _contacts_set(struct jmap_req *req, unsigned kind)
         }
         olduid = cdata->dav.imap_uid;
 
-        if (!jmap_hasrights(req, cdata->dav.mailbox, JACL_REMOVEITEMS)) {
-            int rights = jmap_myrights(req, cdata->dav.mailbox);
+        mbentry = jmap_mbentry_by_uniqueid_copy(req, cdata->dav.mailbox);
+
+        if (!mbentry || !jmap_hasrights_mbentry(req, mbentry, JACL_REMOVEITEMS)) {
+            int rights = mbentry ? jmap_myrights_mbentry(req, mbentry) : 0;
             json_t *err = json_pack("{s:s}", "type",
                                     rights & JACL_READITEMS ?
                                     "accountReadOnly" : "notFound");
             json_object_set_new(set.not_destroyed, uid, err);
+            mboxlist_entry_free(&mbentry);
             continue;
         }
 
-        if (!mailbox || strcmp(mailbox->name, cdata->dav.mailbox)) {
+        if (!mailbox || strcmp(mailbox->name, mbentry->name)) {
             jmap_closembox(req, &mailbox);
-            r = jmap_openmbox(req, cdata->dav.mailbox, &mailbox, 1);
-            if (r) goto done;
+            r = jmap_openmbox(req, mbentry->name, &mailbox, 1);
         }
+        mboxlist_entry_free(&mbentry);
+        if (r) goto done;
 
         syslog(LOG_NOTICE,
                "jmap: remove %s %s/%s",
@@ -2019,8 +2061,13 @@ static int getcontacts_cb(void *rock, struct carddav_data *cdata)
     json_t *obj = NULL;
     int r = 0;
 
-    if (!jmap_hasrights(crock->req, cdata->dav.mailbox, JACL_READITEMS))
+    mbentry_t *mbentry = jmap_mbentry_by_uniqueid_copy(crock->req,
+                                                       cdata->dav.mailbox);
+
+    if (!mbentry || !jmap_hasrights_mbentry(crock->req, mbentry, JACL_READITEMS)) {
+        mboxlist_entry_free(&mbentry);
         return 0;
+    }
 
     if (cdata->jmapversion == JMAPCACHE_CONTACTVERSION) {
         json_error_t jerr;
@@ -2028,11 +2075,12 @@ static int getcontacts_cb(void *rock, struct carddav_data *cdata)
         goto gotvalue;
     }
 
-    if (!crock->mailbox || strcmp(crock->mailbox->name, cdata->dav.mailbox)) {
+    if (!crock->mailbox || strcmp(crock->mailbox->uniqueid, mbentry->uniqueid)) {
         mailbox_close(&crock->mailbox);
-        r = mailbox_open_irl(cdata->dav.mailbox, &crock->mailbox);
-        if (r) return r;
+        r = mailbox_open_irl(mbentry->name, &crock->mailbox);
     }
+    mboxlist_entry_free(&mbentry);
+    if (r) return r;
 
     r = mailbox_find_index_record(crock->mailbox, cdata->dav.imap_uid, &record);
     if (r) return r;
@@ -2856,8 +2904,13 @@ static int _contactsquery_cb(void *rock, struct carddav_data *cdata)
         return 0;
     }
 
-    if (!jmap_hasrights(crock->req, cdata->dav.mailbox, JACL_READITEMS))
+    mbentry_t *mbentry = jmap_mbentry_by_uniqueid_copy(crock->req,
+                                                       cdata->dav.mailbox);
+
+    if (!mbentry || !jmap_hasrights_mbentry(crock->req, mbentry, JACL_READITEMS)) {
+        mboxlist_entry_free(&mbentry);
         return 0;
+    }
 
     if (cdata->jmapversion == JMAPCACHE_CONTACTVERSION) {
         json_error_t jerr;
@@ -2866,11 +2919,12 @@ static int _contactsquery_cb(void *rock, struct carddav_data *cdata)
     }
 
     /* Open mailbox. */
-    if (!crock->mailbox || strcmp(crock->mailbox->name, cdata->dav.mailbox)) {
+    if (!crock->mailbox || strcmp(crock->mailbox->uniqueid, cdata->dav.mailbox)) {
         mailbox_close(&crock->mailbox);
-        r = mailbox_open_irl(cdata->dav.mailbox, &crock->mailbox);
-        if (r) goto done;
+        r = mailbox_open_irl(mbentry->name, &crock->mailbox);
     }
+    mboxlist_entry_free(&mbentry);
+    if (r) return r;
 
     /* Load record. */
     r = mailbox_find_index_record(crock->mailbox, cdata->dav.imap_uid, &record);
@@ -3772,6 +3826,7 @@ static void _make_fn(struct vparse_card *card)
 static int _json_to_card(struct jmap_req *req,
                          struct carddav_data *cdata,
                          struct vparse_card *card,
+                         const char *mboxname,
                          json_t *arg, strarray_t *flags,
                          struct entryattlist **annotsp,
                          json_t **item,
@@ -3814,7 +3869,7 @@ static int _json_to_card(struct jmap_req *req,
                 continue;
             }
             else if (!strcmp(key, "x-href")) {
-                char *xhref = jmap_xhref(cdata->dav.mailbox, cdata->dav.resource);
+                char *xhref = jmap_xhref(mboxname, cdata->dav.resource);
                 if (strcmpnull(json_string_value(jval), xhref)) {
                     json_array_append_new(invalid, json_string("x-href"));
                 }
@@ -4157,7 +4212,8 @@ static int _contact_set_create(jmap_req_t *req, unsigned kind,
     }
     else {
         flags = strarray_new();
-        r = _json_to_card(req, cdata, card, jcard, flags, &annots, &item, errors);
+        r = _json_to_card(req, cdata, card, mboxname,
+                          jcard, flags, &annots, &item, errors);
 
         logfmt = "jmap: create contact %s/%s (%s)";
     }
@@ -4217,6 +4273,7 @@ static void _contact_copy(jmap_req_t *req,
     json_t *dst_card = NULL;
     struct mailbox *src_mbox = NULL;
     struct mailbox *dst_mbox = NULL;
+    mbentry_t *mbentry = NULL;
     int r = 0;
 
     /* Read mandatory properties */
@@ -4243,14 +4300,17 @@ static void _contact_copy(jmap_req_t *req,
         *set_err = json_pack("{s:s}", "type", "notFound");
         goto done;
     }
-    if (!jmap_hasrights(req, cdata->dav.mailbox, JACL_READITEMS)) {
+
+    mbentry = jmap_mbentry_by_uniqueid_copy(req, cdata->dav.mailbox);
+    if (!mbentry || !jmap_hasrights_mbentry(req, mbentry, JACL_READITEMS)) {
         *set_err = json_pack("{s:s}", "type", "notFound");
         goto done;
     }
 
     /* Read source event */
-    r = jmap_openmbox(req, cdata->dav.mailbox, &src_mbox, /*rw*/0);
+    r = jmap_openmbox(req, mbentry->name, &src_mbox, /*rw*/0);
     if (r) goto done;
+
     struct index_record record;
     r = mailbox_find_index_record(src_mbox, cdata->dav.imap_uid, &record);
     if (!r) vcard = record_to_vcard(src_mbox, &record);
@@ -4310,6 +4370,7 @@ done:
         else
             *set_err = jmap_server_error(r);
     }
+    mboxlist_entry_free(&mbentry);
     jmap_closembox(req, &dst_mbox);
     jmap_closembox(req, &src_mbox);
     if (vcard) vparse_free_card(vcard);
