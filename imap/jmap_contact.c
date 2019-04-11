@@ -325,6 +325,7 @@ static int getgroups_cb(void *rock, struct carddav_data *cdata)
     int r = 0;
 
     mbentry = jmap_mbentry_by_uniqueid_copy(crock->req, cdata->dav.mailbox);
+    if (!mbentry) jmap_mboxlist_lookup(cdata->dav.mailbox, &mbentry, NULL);
 
     if (!mbentry || !jmap_hasrights_mbentry(req, mbentry, JACL_READITEMS)) {
         mboxlist_entry_free(&mbentry);
@@ -645,12 +646,10 @@ static int _contacts_get(struct jmap_req *req, carddav_cb_t *cb, int kind)
         goto done;
     }
 
-    const char *mboxid = NULL;
     if (addressbookId) {
         char *mboxname = carddav_mboxname(req->accountid, addressbookId);
         mboxlist_lookup_allow_all(mboxname, &mbentry, NULL);
         free(mboxname);
-        if (mbentry) mboxid = mbentry->uniqueid;
         /* XXX  invalidArgument? */
     }
 
@@ -661,7 +660,7 @@ static int _contacts_get(struct jmap_req *req, carddav_cb_t *cb, int kind)
             rock.rows = 0;
             const char *id = json_string_value(jval);
 
-            r = carddav_get_cards(db, mboxid, id, kind, cb, &rock);
+            r = carddav_get_cards(db, DAV_KEY_MBE(mbentry), id, kind, cb, &rock);
             if (r || !rock.rows) {
                 json_array_append(get.not_found, jval);
             }
@@ -670,7 +669,7 @@ static int _contacts_get(struct jmap_req *req, carddav_cb_t *cb, int kind)
     }
     else {
         rock.rows = 0;
-        r = carddav_get_cards(db, mboxid, NULL, kind, cb, &rock);
+        r = carddav_get_cards(db, DAV_KEY_MBE(mbentry), NULL, kind, cb, &rock);
         if (r) goto done;
     }
 
@@ -720,6 +719,7 @@ static int getchanges_cb(void *rock, struct carddav_data *cdata)
     mbentry_t *mbentry = NULL;
 
     mbentry = jmap_mbentry_by_uniqueid_copy(urock->req, dav.mailbox);
+    if (!mbentry) jmap_mboxlist_lookup(dav.mailbox, &mbentry, NULL);
 
     int rights =
         mbentry && jmap_hasrights_mbentry(urock->req, mbentry, JACL_READITEMS);
@@ -776,12 +776,10 @@ static int _contacts_changes(struct jmap_req *req, int kind)
         goto done;
     }
 
-    const char *mboxid = NULL;
     if (addressbookId) {
         char *mboxname = carddav_mboxname(req->accountid, addressbookId);
         mboxlist_lookup_allow_all(mboxname, &mbentry, NULL);
         free(mboxname);
-        if (mbentry) mboxid = mbentry->uniqueid;
         /* XXX  invalidArgument? */
     }
 
@@ -794,7 +792,7 @@ static int _contacts_changes(struct jmap_req *req, int kind)
         goto done;
     }
     struct changes_rock rock = { req, &changes, 0 /*seen_records*/, 0 /*highestmodseq*/};
-    r = carddav_get_updates(db, changes.since_modseq, mboxid, kind,
+    r = carddav_get_updates(db, changes.since_modseq, DAV_KEY_MBE(mbentry), kind,
                             -1 /*max_records*/, &getchanges_cb, &rock);
     if (r) goto done;
 
@@ -1013,6 +1011,7 @@ static void _contacts_set(struct jmap_req *req, unsigned kind)
         }
 
         mbentry = jmap_mbentry_by_uniqueid_copy(req, cdata->dav.mailbox);
+        if (!mbentry) jmap_mboxlist_lookup(cdata->dav.mailbox, &mbentry, NULL);
 
         json_t *abookid = json_object_get(arg, "addressbookId");
         if (abookid && json_string_value(abookid)) {
@@ -1289,6 +1288,7 @@ static void _contacts_set(struct jmap_req *req, unsigned kind)
         olduid = cdata->dav.imap_uid;
 
         mbentry = jmap_mbentry_by_uniqueid_copy(req, cdata->dav.mailbox);
+        if (!mbentry) jmap_mboxlist_lookup(cdata->dav.mailbox, &mbentry, NULL);
 
         if (!mbentry || !jmap_hasrights_mbentry(req, mbentry, JACL_REMOVEITEMS)) {
             int rights = mbentry ? jmap_myrights_mbentry(req, mbentry) : 0;
@@ -2063,6 +2063,7 @@ static int getcontacts_cb(void *rock, struct carddav_data *cdata)
 
     mbentry_t *mbentry = jmap_mbentry_by_uniqueid_copy(crock->req,
                                                        cdata->dav.mailbox);
+    if (!mbentry) jmap_mboxlist_lookup(cdata->dav.mailbox, &mbentry, NULL);
 
     if (!mbentry || !jmap_hasrights_mbentry(crock->req, mbentry, JACL_READITEMS)) {
         mboxlist_entry_free(&mbentry);
@@ -2906,6 +2907,7 @@ static int _contactsquery_cb(void *rock, struct carddav_data *cdata)
 
     mbentry_t *mbentry = jmap_mbentry_by_uniqueid_copy(crock->req,
                                                        cdata->dav.mailbox);
+    if (!mbentry) jmap_mboxlist_lookup(cdata->dav.mailbox, &mbentry, NULL);
 
     if (!mbentry || !jmap_hasrights_mbentry(crock->req, mbentry, JACL_READITEMS)) {
         mboxlist_entry_free(&mbentry);
@@ -4302,6 +4304,7 @@ static void _contact_copy(jmap_req_t *req,
     }
 
     mbentry = jmap_mbentry_by_uniqueid_copy(req, cdata->dav.mailbox);
+    if (!mbentry) jmap_mboxlist_lookup(cdata->dav.mailbox, &mbentry, NULL);
     if (!mbentry || !jmap_hasrights_mbentry(req, mbentry, JACL_READITEMS)) {
         *set_err = json_pack("{s:s}", "type", "notFound");
         goto done;
