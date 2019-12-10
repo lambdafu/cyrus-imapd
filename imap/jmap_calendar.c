@@ -89,7 +89,7 @@ static int jmap_calendarevent_copy(struct jmap_req *req);
 
 static int jmap_calendarevent_getblob(jmap_req_t *req, jmap_getblob_context_t *ctx);
 
-#define JMAPCACHE_CALVERSION 19
+#define JMAPCACHE_CALVERSION 22
 
 jmap_method_t jmap_calendar_methods_standard[] = {
     {
