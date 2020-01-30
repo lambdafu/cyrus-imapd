@@ -1920,6 +1920,7 @@ static int jmap_contact_getblob(jmap_req_t *req, jmap_getblob_context_t *ctx)
     struct mailbox *mailbox = NULL;
     struct vparse_card *vcard = NULL;
     char *uid = NULL, *prop = NULL, *mediatype = NULL;
+    mbentry_t *mbentry = NULL;
     modseq_t modseq;
     struct message_guid guid = MESSAGE_GUID_INITIALIZER;
     int res = HTTP_OK;
@@ -1944,7 +1945,9 @@ static int jmap_contact_getblob(jmap_req_t *req, jmap_getblob_context_t *ctx)
         res = HTTP_NOT_FOUND;
         goto done;
     }
-    if (!jmap_hasrights(req, cdata->dav.mailbox, JACL_READITEMS)) {
+
+    mbentry = jmap_mbentry_from_dav(req, &cdata->dav);
+    if (!mbentry || !jmap_hasrights_mbentry(req, mbentry, JACL_READITEMS)) {
         res = HTTP_NOT_FOUND;
         goto done;
     }
@@ -1969,7 +1972,7 @@ static int jmap_contact_getblob(jmap_req_t *req, jmap_getblob_context_t *ctx)
     }
 
     /* Open mailbox, we need it now */
-    if ((r = jmap_openmbox(req, cdata->dav.mailbox, &mailbox, 0))) {
+    if ((r = jmap_openmbox(req, mbentry->name, &mailbox, 0))) {
         ctx->errstr = error_message(r);
         res = HTTP_SERVER_ERROR;
         goto done;
@@ -2045,6 +2048,7 @@ done:
     if (vcard) vparse_free_card(vcard);
     if (mailbox) jmap_closembox(req, &mailbox);
     if (db) carddav_close(db);
+    mboxlist_entry_free(&mbentry);
     free(uid);
     free(prop);
     free(mediatype);
