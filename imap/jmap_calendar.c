@@ -2686,6 +2686,7 @@ static void getcalendarevents_filterinstance(json_t *myevent,
 {
     json_object_del(myevent, "recurrenceOverrides");
     json_object_del(myevent, "recurrenceRules");
+    json_object_del(myevent, "excludedRecurrenceRules");
     jmap_filterprops(myevent, props);
     json_object_set_new(myevent, "id", json_string(id));
     json_object_set_new(myevent, "uid", json_string(ical_uid));
@@ -3384,6 +3385,11 @@ static const jmap_property_t event_props[] = {
     },
     {
         "excluded",
+        NULL,
+        0
+    },
+    {
+        "excludedRecurrenceRules",
         NULL,
         0
     },
@@ -4274,6 +4280,7 @@ static int setcalendarevents_apply_patch(jmap_req_t *req,
 
         json_object_del(new_instance, "recurrenceRules");
         json_object_del(new_instance, "recurrenceOverrides");
+        json_object_del(new_instance, "excludedRecurrenceRules");
         new_override = jmap_patchobject_create(old_event, new_instance);
         json_object_del(new_override, "@type");
         json_object_del(new_override, "method");
@@ -4281,6 +4288,7 @@ static int setcalendarevents_apply_patch(jmap_req_t *req,
         json_object_del(new_override, "recurrenceId");
         json_object_del(new_override, "recurrenceRules");
         json_object_del(new_override, "recurrenceOverrides");
+        json_object_del(new_override, "excludedRecurrenceRules");
         json_object_del(new_override, "relatedTo");
         json_object_del(new_override, "replyTo");
         json_object_del(new_override, "uid");
