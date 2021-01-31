@@ -958,7 +958,6 @@ static void free_script_info(void *data)
 }
 
 typedef struct filter_rock {
-    const char *sievedir;
     struct jmap_query *query;
     jmap_filter *parsed_filter;
     ptrarray_t matches;
@@ -970,12 +969,6 @@ static int filter_cb(void *rock, struct sieve_data *sdata)
     struct filter_rock *frock = (struct filter_rock *) rock;
     struct jmap_query *query = frock->query;
     script_info *info;
-
-    if (!info->id) {
-        /* Create script id symlink */
-        info->id = xstrdup(makeuuid());
-        create_id_link(frock->sievedir, info->id, script);
-    }
 
     if (query->filter &&
         !jmap_filter_match(frock->parsed_filter, &filter_match, sdata)) {
